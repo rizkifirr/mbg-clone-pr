@@ -1,0 +1,1225 @@
+"use client";
+
+import { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import {
+  ExternalLink,
+  Printer,
+  PackageSearch,
+  Search,
+  ArrowUpDown,
+  ChevronUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Pencil,
+  Trash2,
+  EyeOff,
+  Eye,
+  X,
+  Loader2,
+  ShieldAlert,
+  UploadCloud,
+  Video,
+  QrCode,
+} from "lucide-react";
+import imageCompression from "browser-image-compression";
+import { QRCodeSVG } from "qrcode.react";
+
+type Item = {
+  id: number;
+  sku: string;
+  title: string;
+  branchName: string;
+  price: any;
+  status: string;
+  isMarketplaceVisible: boolean;
+  hasWarranty?: boolean;
+};
+
+type SortField = "sku" | "title" | "price" | "status" | null;
+type SortDirection = "asc" | "desc";
+
+const ITEMS_PER_PAGE = 20;
+
+export default function ItemsTableClient({ items }: { items: Item[] }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortField, setSortField] = useState<SortField>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [userRole, setUserRole] = useState<string | null>(null);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<Item | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  
+  // Return reason states
+  const [returnConfirm, setReturnConfirm] = useState<{
+    isOpen: boolean;
+    itemId: number | null;
+    itemSku: string | null;
+    itemName: string | null;
+  }>({
+    isOpen: false,
+    itemId: null,
+    itemSku: null,
+    itemName: null,
+  });
+  const [returnReasonText, setReturnReasonText] = useState("");
+
+  // Full form edit states
+  const [editingItem, setEditingItem] = useState<any | null>(null);
+  const [editPriceText, setEditPriceText] = useState("");
+  const [compressedImages, setCompressedImages] = useState<any[]>([]);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+
+  const router = useRouter();
+
+  // Fetch user role on mount for RBAC
+  useEffect(() => {
+    fetch("/api/admin/users/me")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) {
+          setUserRole(data.data.role);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const formatIDR = (val: any) => {
+    return new Intl.NumberFormat("id-ID", {
+      style: "currency",
+      currency: "IDR",
+      maximumFractionDigits: 0,
+    }).format(Number(val));
+  };
+
+  // Format a raw number string into Indonesian dot-separated thousands (e.g. "8000000" → "8.000.000")
+  const formatRupiahMask = (value: string): string => {
+    const digits = value.replace(/\D/g, "");
+    if (!digits) return "";
+    return new Intl.NumberFormat("id-ID").format(Number(digits));
+  };
+
+  // Strip dots from masked string back to raw number (e.g. "8.000.000" → 8000000)
+  const parseRupiahMask = (value: string): number => {
+    return Number(value.replace(/\./g, "")) || 0;
+  };
+
+  const formatBranchName = (name: string) => {
+    if (name && name.toLowerCase().includes("pasuruan")) {
+      return "Cabang Pasuruan - Sangar";
+    }
+    return name;
+  };
+
+  // 1. Filter by search
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        item.sku.toLowerCase().includes(q) ||
+        item.title.toLowerCase().includes(q)
+      );
+    });
+  }, [items, searchQuery]);
+
+  // 2. Sort
+  const sortedItems = useMemo(() => {
+    if (!sortField) return filteredItems;
+
+    return [...filteredItems].sort((a, b) => {
+      let cmp = 0;
+      switch (sortField) {
+        case "sku":
+          cmp = Number(a.sku) - Number(b.sku);
+          if (isNaN(cmp)) cmp = a.sku.localeCompare(b.sku);
+          break;
+        case "title":
+          cmp = a.title.localeCompare(b.title, "id");
+          break;
+        case "price":
+          cmp = Number(a.price) - Number(b.price);
+          break;
+        case "status": {
+          const statusOrder: Record<string, number> = {
+            Terjual: 0,
+            Dipesan: 1,
+            Tersedia: 2,
+            RETUR: 3,
+          };
+          cmp = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
+          break;
+        }
+      }
+      return sortDirection === "asc" ? cmp : -cmp;
+    });
+  }, [filteredItems, sortField, sortDirection]);
+
+  // 3. Paginate
+  const totalPages = Math.max(1, Math.ceil(sortedItems.length / ITEMS_PER_PAGE));
+  const paginatedItems = useMemo(() => {
+    const start = (currentPage - 1) * ITEMS_PER_PAGE;
+    return sortedItems.slice(start, start + ITEMS_PER_PAGE);
+  }, [sortedItems, currentPage]);
+
+  // Reset page on filter/sort change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, sortField, sortDirection]);
+
+  // Sort toggle handler
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      if (sortDirection === "asc") {
+        setSortDirection("desc");
+      } else {
+        setSortField(null);
+        setSortDirection("asc");
+      }
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  // Sort icon renderer
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (sortField !== field) {
+      return <ArrowUpDown className="w-3.5 h-3.5 text-slate-300 group-hover:text-blue-500 transition-colors" />;
+    }
+    return sortDirection === "asc" ? (
+      <ChevronUp className="w-3.5 h-3.5 text-blue-600" />
+    ) : (
+      <ChevronDown className="w-3.5 h-3.5 text-blue-600" />
+    );
+  };
+
+  // ──── Action Handlers ────
+
+  const handleToggleVisibility = async (item: Item) => {
+    try {
+      const res = await fetch(`/api/admin/items/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          isMarketplaceVisible: !item.isMarketplaceVisible,
+        }),
+      });
+      if (res.ok) {
+        router.refresh();
+      }
+    } catch (err) {
+      console.error("Toggle visibility failed:", err);
+    }
+  };
+
+  // Full Edit Form API operations
+  const openEditForm = async (item: Item) => {
+    setSelectedItem(item);
+    setLoadingDetail(true);
+    try {
+      const res = await fetch(`/api/admin/items/${item.id}`);
+      const resData = await res.json();
+      if (resData.success && resData.data) {
+        setEditingItem(resData.data);
+        setEditPriceText(formatRupiahMask(String(resData.data.price)));
+        setCompressedImages(resData.data.images.map((url: string) => ({ url })));
+      } else {
+        alert(resData.message || "Gagal memuat detail barang.");
+      }
+    } catch (err) {
+      alert("Terjadi kesalahan jaringan.");
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
+  const handleEditFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingItem) return;
+    setActionLoading(true);
+    try {
+      const rawPrice = parseRupiahMask(editPriceText);
+      const payload = {
+        sku: editingItem.sku,
+        title: editingItem.title,
+        category: editingItem.category,
+        kondisi: editingItem.kondisi,
+        price: rawPrice,
+        whatsappNumber: editingItem.whatsappNumber,
+        youtubeUrl: editingItem.youtubeUrl,
+        hasWarranty: editingItem.hasWarranty,
+        description: editingItem.description,
+        defects: editingItem.defects,
+        images: compressedImages.map((img: any) => img.url),
+      };
+
+      const res = await fetch(`/api/admin/items/${editingItem.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const resData = await res.json();
+      if (res.ok && resData.success) {
+        setEditingItem(null);
+        setSelectedItem(null);
+        router.refresh();
+      } else {
+        alert(resData.message || "Gagal menyimpan perubahan barang.");
+      }
+    } catch (err) {
+      alert("Terjadi kesalahan jaringan.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const openDeleteModal = (item: Item) => {
+    setSelectedItem(item);
+    setDeleteModalOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!selectedItem) return;
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/admin/items/${selectedItem.id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDeleteModalOpen(false);
+        setSelectedItem(null);
+        router.refresh();
+      } else {
+        alert(data.message || "Gagal menghapus barang.");
+      }
+    } catch (err) {
+      alert("Terjadi kesalahan jaringan.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const openReturnConfirm = (item: Item) => {
+    setReturnReasonText("");
+    setReturnConfirm({
+      isOpen: true,
+      itemId: item.id,
+      itemSku: item.sku,
+      itemName: item.title,
+    });
+  };
+
+  // Return Action Bridge
+  const handleReturnItem = async (itemId: number) => {
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/admin/items/${itemId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "RETUR",
+          returnReason: returnReasonText,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowSuccessModal(true);
+        router.refresh();
+      } else {
+        alert(data.message || "Gagal memproses retur.");
+      }
+    } catch (err) {
+      alert("Terjadi kesalahan jaringan.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const isSuperAdmin = userRole === "SUPERADMIN";
+
+  // ──── Status Badge ────
+  const StatusBadge = ({ status }: { status: string }) => (
+    <span
+      className={`px-2.5 py-1 rounded-md text-[10px] uppercase tracking-wider font-bold ${
+        status === "Tersedia"
+          ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+          : status === "Terjual"
+          ? "bg-slate-700 text-white border border-slate-800"
+          : status === "RETUR"
+          ? "bg-rose-50 text-rose-700 border border-rose-200"
+          : "bg-amber-50 text-amber-700 border border-amber-200"
+      }`}
+    >
+      {status}
+    </span>
+  );
+
+  // ──── Pagination Controls ────
+  const PaginationBar = () => {
+    if (sortedItems.length <= ITEMS_PER_PAGE) return null;
+    return (
+      <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-4 py-3 shadow-sm">
+        <p className="text-sm text-slate-500 font-medium">
+          Halaman <span className="text-slate-900 font-bold">{currentPage}</span> dari{" "}
+          <span className="text-slate-900 font-bold">{totalPages}</span>
+          <span className="hidden sm:inline text-slate-400 ml-2">
+            ({sortedItems.length} barang)
+          </span>
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={currentPage === 1}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-all min-h-[44px] justify-center"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            <span className="hidden sm:inline">Sebelumnya</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={currentPage === totalPages}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-all min-h-[44px] justify-center"
+          >
+            <span className="hidden sm:inline">Berikutnya</span>
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ─── FULL EDIT FORM RENDER ───
+  if (editingItem) {
+    const inputClassName =
+      "w-full bg-white border border-slate-300 rounded-xl px-4 py-3 md:py-2.5 min-h-[44px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all shadow-sm text-base md:text-sm";
+
+    const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+
+      const options = {
+        maxSizeMB: 0.5,
+        maxWidthOrHeight: 1024,
+        useWebWorker: true,
+      };
+
+      const newImages: any[] = [];
+      for (let i = 0; i < files.length; i++) {
+        try {
+          const file = files[i];
+          const compressedFile = await imageCompression(file, options);
+          const reader = new FileReader();
+          const result = await new Promise<string>((resolve) => {
+            reader.readAsDataURL(compressedFile);
+            reader.onloadend = () => resolve(reader.result as string);
+          });
+          newImages.push({ url: result });
+        } catch (err) {
+          console.error("Failed to compress image:", err);
+        }
+      }
+      setCompressedImages((prev) => [...prev, ...newImages]);
+      e.target.value = "";
+    };
+
+    const removeImage = (idx: number) => {
+      setCompressedImages((prev) => prev.filter((_, i) => i !== idx));
+    };
+
+    return (
+      <div className="max-w-5xl mx-auto space-y-6 pb-12 animate-in fade-in duration-200">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold text-slate-900">Edit Detail Barang</h1>
+          <p className="text-sm md:text-base text-slate-500 mt-1">
+            Ubah detail spesifikasi barang lelang atau preloved katalog secara lengkap.
+          </p>
+        </div>
+
+        <div className="bg-white rounded-2xl p-5 md:p-8 border border-slate-200 shadow-md">
+          <form onSubmit={handleEditFormSubmit} className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+              {/* SKU */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Nomor SKU Barang <span className="text-red-500">*</span>
+                </label>
+                <input
+                  required
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={editingItem.sku}
+                  onChange={(e) => setEditingItem({ ...editingItem, sku: e.target.value.replace(/\D/g, "") })}
+                  className={inputClassName}
+                  placeholder="Contoh: 001234"
+                />
+                <p className="text-xs text-slate-400 mt-1">Harus unik. Hanya angka yang diperbolehkan.</p>
+              </div>
+
+              {/* Title */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Nama Barang <span className="text-red-500">*</span>
+                </label>
+                <input
+                  required
+                  type="text"
+                  value={editingItem.title}
+                  onChange={(e) => setEditingItem({ ...editingItem, title: e.target.value })}
+                  className={inputClassName}
+                  placeholder="Contoh: iPhone 13 Pro Max"
+                />
+              </div>
+
+              {/* Kategori */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Kategori</label>
+                <select
+                  value={editingItem.category}
+                  onChange={(e) => setEditingItem({ ...editingItem, category: e.target.value })}
+                  className={inputClassName}
+                >
+                  <option>Elektronik</option>
+                  <option>Gerabahan</option>
+                  <option>Kendaraan</option>
+                </select>
+              </div>
+
+              {/* Kondisi */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Status Kondisi Barang</label>
+                <div className="flex gap-3 h-12 md:h-11">
+                  <button
+                    type="button"
+                    onClick={() => setEditingItem({ ...editingItem, kondisi: "Baru" })}
+                    className={`flex-1 px-4 rounded-xl font-semibold text-sm border-2 transition-all shadow-sm ${
+                      editingItem.kondisi === "Baru"
+                        ? "border-green-500 bg-green-50 text-green-700 ring-2 ring-green-500/20"
+                        : "border-slate-300 bg-white text-slate-600 hover:border-slate-400"
+                    }`}
+                  >
+                    ✨ Baru
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingItem({ ...editingItem, kondisi: "Bekas" })}
+                    className={`flex-1 px-4 rounded-xl font-semibold text-sm border-2 transition-all shadow-sm ${
+                      editingItem.kondisi === "Bekas"
+                        ? "border-slate-700 bg-slate-100 text-slate-800 ring-2 ring-slate-500/20"
+                        : "border-slate-300 bg-white text-slate-600 hover:border-slate-400"
+                    }`}
+                  >
+                    ♻️ Bekas
+                  </button>
+                </div>
+              </div>
+
+              {/* Harga Jual */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Harga Jual (Rp) <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-semibold text-sm">Rp</span>
+                  <input
+                    required
+                    type="text"
+                    inputMode="numeric"
+                    value={editPriceText}
+                    onChange={(e) => setEditPriceText(formatRupiahMask(e.target.value))}
+                    className={`${inputClassName} pl-10`}
+                    placeholder="5.000.000"
+                  />
+                </div>
+                <p className="text-xs text-slate-400 mt-1">Ketik angka, titik pemisah ribuan otomatis muncul.</p>
+              </div>
+
+              {/* WhatsApp CS */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Nomor WhatsApp CS <span className="text-red-500">*</span>
+                </label>
+                <input
+                  required
+                  type="text"
+                  value={editingItem.whatsappNumber}
+                  onChange={(e) => setEditingItem({ ...editingItem, whatsappNumber: e.target.value })}
+                  className={inputClassName}
+                  placeholder="628..."
+                />
+              </div>
+
+              {/* Lokasi Cabang */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Lokasi Cabang</label>
+                <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 md:py-2.5 text-slate-500 text-base md:text-sm font-medium flex items-center gap-2 cursor-not-allowed shadow-sm">
+                  <span className="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0"></span>
+                  <span className="truncate">{editingItem.branchName} (Terkunci)</span>
+                </div>
+              </div>
+
+              {/* YouTube Link */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-1.5">
+                  <Video className="w-4 h-4 text-red-500 shrink-0" />
+                  Link Video Demo YouTube (Opsional)
+                </label>
+                <input
+                  type="url"
+                  value={editingItem.youtubeUrl || ""}
+                  onChange={(e) => setEditingItem({ ...editingItem, youtubeUrl: e.target.value })}
+                  className={inputClassName}
+                  placeholder="https://youtube.com/watch?v=..."
+                />
+              </div>
+
+              {/* Warranty */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Garansi</label>
+                <div className="flex items-center gap-3 bg-white border border-slate-300 rounded-xl px-4 py-3 min-h-[44px] shadow-sm">
+                  <input
+                    type="checkbox"
+                    id="editHasWarranty"
+                    checked={!!editingItem.hasWarranty}
+                    onChange={(e) => setEditingItem({ ...editingItem, hasWarranty: e.target.checked })}
+                    className="w-5 h-5 text-brand-600 border-slate-300 rounded focus:ring-brand-500 transition-all cursor-pointer"
+                  />
+                  <label htmlFor="editHasWarranty" className="text-sm font-semibold text-slate-700 cursor-pointer select-none">
+                    🛡️ Memiliki Garansi Resmi MBG
+                  </label>
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Deskripsi / Spesifikasi <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={5}
+                  value={editingItem.description}
+                  onChange={(e) => setEditingItem({ ...editingItem, description: e.target.value })}
+                  className={inputClassName}
+                  placeholder="Spesifikasi, kelengkapan, dan informasi penting untuk pembeli..."
+                />
+              </div>
+
+              {/* Defects */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Minus / Defect (Opsional)
+                </label>
+                <textarea
+                  rows={5}
+                  value={editingItem.defects || ""}
+                  onChange={(e) => setEditingItem({ ...editingItem, defects: e.target.value })}
+                  className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 md:py-2.5 min-h-[44px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 transition-all shadow-sm text-base md:text-sm"
+                  placeholder="Catat jika ada lecet, kerusakan kecil, dll."
+                />
+              </div>
+            </div>
+
+            {/* Images upload */}
+            <div className="border-t border-slate-200 pt-6 mt-2">
+              <label className="block text-sm font-semibold text-slate-700 mb-3">
+                Upload Gambar Marketplace (Wajib Upload Manual)
+              </label>
+
+              <div className="space-y-4">
+                <label className="flex flex-col items-center justify-center w-full h-40 md:h-36 border-2 border-dashed border-slate-300 rounded-2xl cursor-pointer bg-slate-50 hover:bg-slate-100 hover:border-brand-500 transition-all">
+                  <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                    <UploadCloud className="w-10 h-10 text-slate-400 mb-2" />
+                    <p className="text-sm text-slate-600 text-center px-4">
+                      <span className="font-semibold text-brand-600">Klik untuk upload gambar baru</span> (bisa pilih banyak)
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1">Maks. 5MB per file, format JPG/PNG</p>
+                  </div>
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept="image/*"
+                    multiple
+                    onChange={handleImageUpload}
+                  />
+                </label>
+
+                {compressedImages.length > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-sm font-semibold text-slate-700">
+                      {compressedImages.length} gambar terpilih
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-3">
+                      {compressedImages.map((img, idx) => (
+                        <div
+                          key={idx}
+                          className="relative group rounded-xl overflow-hidden border border-slate-200 shadow-sm bg-slate-100 aspect-square"
+                        >
+                          <img
+                            src={img.url}
+                            alt={`Preview ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeImage(idx)}
+                            className="absolute top-2 right-2 w-8 h-8 md:w-6 md:h-6 bg-red-500 hover:bg-red-600 text-white rounded-full flex items-center justify-center shadow-md transition-opacity"
+                          >
+                            <X className="w-4 h-4 md:w-3.5 md:h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="border-t border-slate-200 pt-6 mt-2 flex flex-col md:flex-row items-center md:items-end justify-between gap-6">
+              {editingItem.sku?.trim() && (
+                <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 flex items-center gap-4 shadow-sm w-full md:w-auto">
+                  <div className="bg-white p-2 rounded-lg border border-slate-100 shrink-0">
+                    <QRCodeSVG
+                      value={editingItem.sku.trim()}
+                      size={64}
+                      level="M"
+                      bgColor="#ffffff"
+                      fgColor="#0f172a"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mb-1">
+                      <QrCode className="w-3.5 h-3.5" /> QR Code Preview
+                    </p>
+                    <p className="text-[11px] text-slate-500 font-mono break-all line-clamp-1">{editingItem.sku.trim()}</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3 w-full md:w-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingItem(null);
+                    setSelectedItem(null);
+                  }}
+                  disabled={actionLoading}
+                  className="w-full md:w-auto px-6 py-3 border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-semibold min-h-[44px] flex items-center justify-center"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading || !editingItem.title?.trim() || !editPriceText}
+                  className="w-full md:w-auto px-8 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-md hover:shadow-lg transition-all disabled:opacity-70 flex justify-center items-center gap-2 min-h-[44px]"
+                >
+                  {actionLoading ? "Menyimpan..." : "Simpan Perubahan"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Search Bar */}
+      <div className="relative">
+        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 pointer-events-none" />
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Cari SKU atau Nama Barang..."
+          className="w-full bg-white border border-slate-300 rounded-xl pl-12 pr-4 py-3 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all shadow-sm text-sm font-medium min-h-[44px]"
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery("")}
+            className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors text-xs font-semibold bg-slate-100 px-2 py-1 rounded-md min-h-[32px]"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      {/* Results count when searching */}
+      {searchQuery.trim() && (
+        <p className="text-xs text-slate-500 font-medium px-1">
+          Menampilkan {filteredItems.length} dari {items.length} barang
+        </p>
+      )}
+
+      {/* ═══════════ Desktop Table ═══════════ */}
+      <div className="hidden md:block bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
+              <tr>
+                <th className="px-6 py-4 font-semibold">
+                  <button
+                    onClick={() => handleSort("sku")}
+                    className="group flex items-center gap-1.5 hover:text-blue-600 transition-colors"
+                  >
+                    SKU
+                    <SortIcon field="sku" />
+                  </button>
+                </th>
+                <th className="px-6 py-4 font-semibold">
+                  <button
+                    onClick={() => handleSort("title")}
+                    className="group flex items-center gap-1.5 hover:text-blue-600 transition-colors"
+                  >
+                    Nama Barang
+                    <SortIcon field="title" />
+                  </button>
+                </th>
+                <th className="px-6 py-4 font-semibold">
+                  <button
+                    onClick={() => handleSort("price")}
+                    className="group flex items-center gap-1.5 hover:text-blue-600 transition-colors"
+                  >
+                    Harga
+                    <SortIcon field="price" />
+                  </button>
+                </th>
+                <th className="px-6 py-4 font-semibold">
+                  <button
+                    onClick={() => handleSort("status")}
+                    className="group flex items-center gap-1.5 hover:text-blue-600 transition-colors"
+                  >
+                    Status
+                    <SortIcon field="status" />
+                  </button>
+                </th>
+                <th className="px-6 py-4 font-semibold text-right">Aksi</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {paginatedItems.map((item, idx) => (
+                <tr
+                  key={item.id}
+                  className={`transition-colors hover:bg-blue-50/50 ${
+                    idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                  } ${!item.isMarketplaceVisible ? "opacity-50" : ""}`}
+                >
+                  <td className="px-6 py-4 font-mono text-slate-900 font-bold">
+                    {item.sku}
+                  </td>
+                  <td className="px-6 py-4 font-medium text-slate-900">
+                    <div className="flex items-center gap-2">
+                      <div className="max-w-[220px] truncate" title={item.title}>
+                        {item.title}
+                      </div>
+                      {!item.isMarketplaceVisible && (
+                        <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold bg-orange-100 text-orange-600 border border-orange-200">
+                          Hidden
+                        </span>
+                      )}
+                      {item.hasWarranty && (
+                        <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-bold bg-blue-100 text-blue-600 border border-blue-200">
+                          🛡️ Garansi
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      {formatBranchName(item.branchName)}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-slate-900 font-medium">
+                    {formatIDR(item.price)}
+                  </td>
+                  <td className="px-6 py-4">
+                    <StatusBadge status={item.status} />
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <div className="flex justify-end gap-1 items-center">
+                      {/* Hide/Show Toggle */}
+                      <button
+                        onClick={() => handleToggleVisibility(item)}
+                        className={`p-1.5 rounded-lg transition-all min-h-[44px] min-w-[44px] flex items-center justify-center ${
+                          item.isMarketplaceVisible
+                            ? "text-slate-400 hover:text-orange-600 hover:bg-orange-50"
+                            : "text-orange-500 hover:text-emerald-600 hover:bg-emerald-50"
+                        }`}
+                        title={
+                          item.isMarketplaceVisible
+                            ? "Sembunyikan dari Marketplace"
+                            : "Tampilkan di Marketplace"
+                        }
+                      >
+                        {item.isMarketplaceVisible ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                      {/* Print */}
+                      <Link
+                        href={`/mbg-internal-portal/items/${item.id}`}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
+                        title="Detail & Print Barcode"
+                      >
+                        <Printer className="w-4 h-4" />
+                      </Link>
+                      {/* External link */}
+                      <Link
+                        href={`/katalog/${item.id}`}
+                        target="_blank"
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
+                        title="Lihat di Publik"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </Link>
+                      {/* Superadmin: Retur (only for Terjual) */}
+                      {isSuperAdmin && item.status === "Terjual" && (
+                        <button
+                          onClick={() => openReturnConfirm(item)}
+                          className="p-1.5 rounded-lg text-orange-500 hover:text-orange-700 hover:bg-orange-50 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Proses Retur Barang"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 15v-6a4 4 0 00-4-4H4m0 0l3-3m-3 3l3 3m1-3h8a4 4 0 014 4v6m-9 5h.01M12 12h.01" />
+                          </svg>
+                        </button>
+                      )}
+                      {/* Superadmin: Edit */}
+                      {isSuperAdmin && (
+                        <button
+                          onClick={() => openEditForm(item)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Edit Barang"
+                          disabled={loadingDetail}
+                        >
+                          {loadingDetail && selectedItem?.id === item.id ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                          ) : (
+                            <Pencil className="w-4 h-4" />
+                          )}
+                        </button>
+                      )}
+                      {/* Superadmin: Delete */}
+                      {isSuperAdmin && (
+                        <button
+                          onClick={() => openDeleteModal(item)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Hapus Barang"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {paginatedItems.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="px-6 py-12 text-center text-slate-500 bg-white"
+                  >
+                    <div className="flex flex-col items-center">
+                      <PackageSearch className="w-12 h-12 mb-3 opacity-20" />
+                      {searchQuery.trim()
+                        ? `Tidak ada barang dengan SKU atau nama "${searchQuery}".`
+                        : "Belum ada barang terdaftar."}
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ═══════════ Mobile Card List ═══════════ */}
+      <div className="block md:hidden space-y-3">
+        {paginatedItems.map((item, idx) => (
+          <div
+            key={item.id}
+            className={`border border-gray-150 rounded-xl p-4 shadow-none flex flex-col gap-3 content-visibility-card ${
+              idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+            } ${!item.isMarketplaceVisible ? "opacity-50" : ""}`}
+          >
+            <div className="flex justify-between items-start gap-2">
+              <div className="flex-1">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <h3 className="font-bold text-slate-900 text-sm line-clamp-2 leading-tight">
+                    {item.title}
+                  </h3>
+                  {!item.isMarketplaceVisible && (
+                    <span className="shrink-0 px-1 py-0.5 rounded text-[8px] uppercase tracking-wider font-bold bg-orange-100 text-orange-600 border border-orange-200">
+                      Hidden
+                    </span>
+                  )}
+                  {item.hasWarranty && (
+                    <span className="shrink-0 px-1 py-0.5 rounded text-[8px] uppercase tracking-wider font-bold bg-blue-100 text-blue-600 border border-blue-200">
+                      🛡️ Garansi
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 font-mono mt-1">
+                  SKU: {item.sku}
+                </p>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {formatBranchName(item.branchName)}
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="font-bold text-slate-900 text-sm">
+                  {formatIDR(item.price)}
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-between items-center pt-2 border-t border-slate-100">
+              <StatusBadge status={item.status} />
+              <div className="flex gap-1.5 items-center">
+                {/* Hide/Show Toggle */}
+                <button
+                  onClick={() => handleToggleVisibility(item)}
+                  className={`p-1.5 rounded-md transition-all min-h-[44px] min-w-[44px] flex items-center justify-center ${
+                    item.isMarketplaceVisible
+                      ? "text-slate-400 hover:text-orange-600 bg-slate-50"
+                      : "text-orange-500 hover:text-emerald-600 bg-orange-50"
+                  }`}
+                >
+                  {item.isMarketplaceVisible ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+                <Link
+                  href={`/mbg-internal-portal/items/${item.id}`}
+                  className="text-slate-400 hover:text-slate-700 p-1.5 bg-slate-50 rounded-md min-h-[44px] min-w-[44px] flex items-center justify-center"
+                >
+                  <Printer className="w-4 h-4" />
+                </Link>
+                <Link
+                  href={`/katalog/${item.id}`}
+                  target="_blank"
+                  className="text-slate-400 hover:text-slate-700 p-1.5 bg-slate-50 rounded-md min-h-[44px] min-w-[44px] flex items-center justify-center"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </Link>
+                {/* Superadmin: Retur (only for Terjual) */}
+                {isSuperAdmin && item.status === "Terjual" && (
+                  <button
+                    onClick={() => openReturnConfirm(item)}
+                    className="text-orange-500 hover:text-orange-700 p-1.5 bg-orange-50 rounded-md min-h-[44px] min-w-[44px] flex items-center justify-center"
+                    title="Proses Retur Barang"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 15v-6a4 4 0 00-4-4H4m0 0l3-3m-3 3l3 3m1-3h8a4 4 0 014 4v6m-9 5h.01M12 12h.01" />
+                    </svg>
+                  </button>
+                )}
+                {isSuperAdmin && (
+                  <button
+                    onClick={() => openEditForm(item)}
+                    className="text-slate-400 hover:text-blue-600 p-1.5 bg-slate-50 rounded-md min-h-[44px] min-w-[44px] flex items-center justify-center"
+                    disabled={loadingDetail}
+                  >
+                    {loadingDetail && selectedItem?.id === item.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                    ) : (
+                      <Pencil className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
+                {isSuperAdmin && (
+                  <button
+                    onClick={() => openDeleteModal(item)}
+                    className="text-slate-400 hover:text-red-600 p-1.5 bg-slate-50 rounded-md min-h-[44px] min-w-[44px] flex items-center justify-center"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+        {paginatedItems.length === 0 && (
+          <div className="py-8 text-center text-slate-500 bg-white border border-slate-200 rounded-xl shadow-sm">
+            <PackageSearch className="w-10 h-10 mb-2 opacity-20 mx-auto" />
+            <p className="text-sm">
+              {searchQuery.trim()
+                ? `Tidak ada barang.`
+                : "Belum ada barang."}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ═══════════ Pagination ═══════════ */}
+      <PaginationBar />
+
+      {/* ═══════════ DELETE MODAL ═══════════ */}
+      {deleteModalOpen && selectedItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => !actionLoading && setDeleteModalOpen(false)}
+          />
+          {/* Modal Card */}
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-red-200 animate-in fade-in zoom-in-95">
+            {/* Header */}
+            <div className="px-6 py-5 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-red-100 flex items-center justify-center mx-auto mb-4">
+                <ShieldAlert className="w-7 h-7 text-red-600" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-900">
+                Hapus Barang?
+              </h3>
+              <p className="text-sm text-slate-500 mt-2">
+                Anda akan menghapus barang ini secara permanen:
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 mt-3 text-left">
+                <p className="text-sm font-bold text-red-900">
+                  {selectedItem.title}
+                </p>
+                <p className="text-xs text-red-600 font-mono mt-1">
+                  SKU: {selectedItem.sku}
+                </p>
+              </div>
+              <p className="text-xs text-red-500 mt-3 font-medium">
+                Aksi ini tidak dapat dibatalkan.
+              </p>
+            </div>
+            {/* Footer */}
+            <div className="flex items-center justify-center gap-3 px-6 py-4 border-t border-red-100 bg-red-50/30 rounded-b-2xl">
+              <button
+                onClick={() => setDeleteModalOpen(false)}
+                disabled={actionLoading}
+                className="px-4 py-2.5 min-h-[44px] text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-all disabled:opacity-50 bg-white border border-slate-200 flex items-center justify-center"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                disabled={actionLoading}
+                className="flex items-center gap-2 px-5 py-2.5 min-h-[44px] text-sm font-semibold text-white bg-red-600 hover:bg-red-500 rounded-lg shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+              >
+                {actionLoading && (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                )}
+                Ya, Hapus
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ RETURN CONFIRMATION MODAL ═══════════ */}
+      {returnConfirm.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="max-w-md w-full bg-white rounded-2xl p-6 shadow-2xl border border-slate-100 flex flex-col items-center text-center animate-in fade-in zoom-in-95 duration-150">
+            
+            <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-500 flex items-center justify-center mb-4">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+
+            <h3 className="text-lg font-bold text-slate-900 mb-2">Konfirmasi Proses Retur</h3>
+            <p className="text-slate-600 text-sm mb-4 leading-relaxed">
+              Apakah Anda yakin ingin memproses retur untuk barang <span className="font-semibold text-slate-900">&quot;{returnConfirm.itemName}&quot;</span>? Aksi ini akan mengurangi total pendapatan berjalan.
+            </p>
+
+            {/* Mandated Return Reason Input */}
+            <div className="w-full text-left mb-5">
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Alasan Barang Diretur <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                required
+                rows={3}
+                value={returnReasonText}
+                onChange={(e) => setReturnReasonText(e.target.value)}
+                placeholder="Contoh: Barang cacat tombol volume macet, customer meminta pembatalan transaksi."
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 transition-all text-sm leading-relaxed"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">Alasan wajib diisi untuk mendokumentasikan retur.</p>
+            </div>
+
+            <div className="w-full grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setReturnConfirm({ isOpen: false, itemId: null, itemSku: null, itemName: null })}
+                className="w-full py-2.5 rounded-xl font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-all min-h-[44px] flex items-center justify-center"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading || !returnReasonText.trim()}
+                onClick={async () => {
+                  if (returnConfirm.itemId !== null) {
+                    await handleReturnItem(returnConfirm.itemId);
+                  }
+                  setReturnConfirm({ isOpen: false, itemId: null, itemSku: null, itemName: null });
+                }}
+                className="w-full py-2.5 rounded-xl font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-100 transition-all min-h-[44px] flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionLoading && <Loader2 className="w-4 h-4 animate-spin mr-1.5" />}
+                Oke, Proses
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ RETURN SUCCESS MODAL ═══════════ */}
+      {showSuccessModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="max-w-sm w-full bg-white rounded-2xl p-6 shadow-2xl border border-slate-50 flex flex-col items-center text-center animate-in fade-in zoom-in-95 duration-200">
+            
+            <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mb-4 scale-0 animate-[scaleIn_0.3s_ease-out_forwards]">
+              <svg className="w-8 h-8 text-emerald-600 stroke-dasharray-[100] stroke-dashoffset-[100] animate-[drawCheck_0.4s_0.2s_ease-out_forwards]" 
+                   fill="none" 
+                   viewBox="0 0 24 24" 
+                   stroke="currentColor" 
+                   strokeWidth={3}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+
+            <h3 className="text-lg font-bold text-slate-900 mb-1">Retur Berhasil!</h3>
+            <p className="text-slate-500 text-sm mb-6 px-2 leading-relaxed">
+              Barang berhasil diretur dan kini otomatis tersedia kembali untuk dijual di katalog.
+            </p>
+
+            <button
+              type="button"
+              onClick={() => setShowSuccessModal(false)}
+              className="w-full py-2.5 rounded-xl font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-100 transition-all active:scale-[0.98] min-h-[44px] flex items-center justify-center"
+            >
+              Selesai
+            </button>
+          </div>
+          <style dangerouslySetInnerHTML={{
+            __html: `
+              @keyframes scaleIn {
+                to { transform: scale(1); }
+              }
+              @keyframes drawCheck {
+                to { stroke-dashoffset: 0; }
+              }
+            `
+          }} />
+        </div>
+      )}
+    </div>
+  );
+}
